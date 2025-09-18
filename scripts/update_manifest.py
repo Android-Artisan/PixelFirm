@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import json, re, requests
-from bs4 import BeautifulSoup
 from pathlib import Path
+from bs4 import BeautifulSoup
 
-URL = "https://developers.google.com/android/images"
+URL = "https://dl.google.com/dl/android/aosp/"
 manifest_path = Path(__file__).resolve().parent.parent / "pixelfirm" / "manifest.json"
 
 def scrape():
@@ -13,12 +13,19 @@ def scrape():
     data = {}
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if "dl.google.com/dl/android/aosp/" in href and href.endswith(".zip"):
+        if href.endswith(".zip") and "-factory-" in href:
+            # Ensure we have a full URL
+            if not href.startswith("http"):
+                href = URL + href
             fname = href.split("/")[-1]
             codename = fname.split("-")[0]
+            # Try to extract build id
             m = re.search(r"-([a-z0-9.]+)-factory", fname)
             version = m.group(1) if m else "unknown"
-            data[codename] = {"url": href, "version": version}
+            data[codename] = {
+                "url": href,
+                "version": version
+            }
     return data
 
 def main():
