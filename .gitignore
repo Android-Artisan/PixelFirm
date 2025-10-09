@@ -1,0 +1,34 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Editor and OS files
+.vscode/
+*.swp
+.DS_Store
+.idea/
+
+# Playwright cache
+.playwright/
+
+# Temporary files
+tmp/
+*.tmp
+
+# Ignore manifest edits in working dir? (manifest is tracked intentionally)
+# pixelfirm/manifest.json

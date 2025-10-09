@@ -45,72 +45,82 @@ def scrape_developers_playwright(timeout: int = 30000) -> Dict[str, dict]:
     This is a best-effort fallback when the AOSP index isn't available.
     """
     collected = {}
+    found_urls = set()
+
+    def try_add_url(url: str):
+        if not url:
+            return
+        if not url.startswith("http"):
+            return
+        if not url.lower().endswith(".zip"):
+            return
+        fname = url.split("/")[-1]
+        if "-factory-" not in fname:
+            return
+        codename = fname.split("-")[0]
+        m = re.search(r"-([a-z0-9.]+)-factory", fname)
+        version = m.group(1) if m else "unknown"
+        collected[codename] = {"url": url, "version": version}
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
+        browser = pw.chromium.launch(headless=True)
         page = browser.new_page()
+
+        # capture responses and search for .zip urls in responses
+        def on_response(response):
+            try:
+                r_url = response.url
+                if r_url.endswith('.zip'):
+                    found_urls.add(r_url)
+                    return
+                ct = response.headers.get('content-type', '')
+                if 'json' in ct or 'text' in ct or 'html' in ct:
+                    try:
+                        body = response.text()
+                    except Exception:
+                        return
+                    for m in re.finditer(r'https?://[^"\'\s]+\.zip', body):
+                        found_urls.add(m.group(0))
+            except Exception:
+                return
+
+        page.on("response", on_response)
         page.goto(URL, timeout=timeout)
         page.wait_for_load_state("networkidle", timeout=timeout)
 
-        # find internal links to device pages
+        # find candidate links to follow (device pages or sections)
         anchors = page.query_selector_all("a[href]")
         device_pages = set()
         for a in anchors:
             href = a.get_attribute("href")
             if not href:
                 continue
-            # only follow links under /android/images
             if href.startswith("/android/images") or href.startswith(URL):
-                # normalize
                 if href.startswith("/"):
                     device_pages.add("https://developers.google.com" + href)
                 else:
                     device_pages.add(href)
 
-        # limit to a reasonable number to avoid long runs
-        for dp in list(device_pages)[:200]:
+        # visit discovered device pages (bounded)
+        for dp in list(device_pages)[:300]:
             try:
                 page.goto(dp, timeout=timeout)
                 page.wait_for_load_state("networkidle", timeout=timeout)
-                anchors = page.query_selector_all("a[href]")
-                for a in anchors:
-                    href = a.get_attribute("href")
-                    if not href:
-                        continue
-                    if ".zip" in href or "dl.google.com" in href:
-                        url = href if href.startswith("http") else page.url.rstrip("/") + "/" + href
-                        fname = url.split("/")[-1]
-                        if "-factory-" not in fname:
-                            continue
-                        codename = fname.split("-")[0]
-                        m = re.search(r"-([a-z0-9.]+)-factory", fname)
-                        version = m.group(1) if m else "unknown"
-                        collected[codename] = {"url": url, "version": version}
-                
-                # Also scan raw HTML and scripts for .zip links
-                html = page.content()
-                for m in re.finditer(r'https?://[^"\']+\.zip', html):
-                    url = m.group(0)
-                    fname = url.split("/")[-1]
-                    if "-factory-" not in fname:
-                        continue
-                    codename = fname.split("-")[0]
-                    mm = re.search(r"-([a-z0-9.]+)-factory", fname)
-                    version = mm.group(1) if mm else "unknown"
-                    collected[codename] = {"url": url, "version": version}
-                # also search scripts for dl.google.com patterns without full url
-                for s in page.query_selector_all('script'):
-                    src = s.get_attribute('src')
-                    if src and '.zip' in src:
-                        url = src if src.startswith('http') else page.url.rstrip('/') + '/' + src
-                        fname = url.split('/')[-1]
-                        if '-factory-' not in fname:
-                            continue
-                        codename = fname.split('-')[0]
-                        mm = re.search(r"-([a-z0-9.]+)-factory", fname)
-                        version = mm.group(1) if mm else 'unknown'
-                        collected[codename] = {'url': url, 'version': version}
             except Exception:
                 continue
+
+        # also search the main page html for urls
+        try:
+            html = page.content()
+            for m in re.finditer(r'https?://[^"\'\s]+\.zip', html):
+                found_urls.add(m.group(0))
+        except Exception:
+            pass
+
+        # post-process found urls
+        for u in sorted(found_urls):
+            try_add_url(u)
+
         browser.close()
     return collected
 
