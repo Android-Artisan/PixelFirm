@@ -157,6 +157,14 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
         # short pause to let client-side scripts run
         page.wait_for_timeout(1500)
 
+        # Always save a main page snapshot (helps CI debugging if no links found)
+        if snapshot_dir:
+            try:
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                (snapshot_dir / "main_page.html").write_text(page.content())
+            except Exception:
+                pass
+
         # find candidate links to follow (device pages or sections)
         anchors = page.query_selector_all("a[href]")
         device_pages = set()
