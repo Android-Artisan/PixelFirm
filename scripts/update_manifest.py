@@ -87,6 +87,8 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
 
     collected = {}
     found_urls = set()
+    responses = []
+    console_messages = []
 
     def try_add_url(url: str, verify: bool = True):
         if not url:
@@ -137,17 +139,57 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                     found_urls.add(r_url)
                     return
                 ct = response.headers.get('content-type', '')
-                if 'json' in ct or 'text' in ct or 'html' in ct:
+                # Record metadata about the response
+                meta = {
+                    'url': r_url,
+                    'status': None,
+                    'content-type': ct,
+                }
+                try:
+                    meta['status'] = response.status
+                except Exception:
+                    pass
+
+                # Try to capture textual responses (json/html/js/text) for offline analysis
+                if any(k in ct for k in ('json', 'text', 'html', 'javascript')):
                     try:
                         body = response.text()
+                        meta['body_snippet'] = body[:4096]
+                        responses.append(meta)
+                        # save full body to snapshot_dir/responses for debugging
+                        if snapshot_dir:
+                            try:
+                                resp_dir = snapshot_dir / 'responses'
+                                resp_dir.mkdir(parents=True, exist_ok=True)
+                                safe_name = re.sub(r'[^a-z0-9._-]+', '_', r_url)
+                                fname = resp_dir / f"{len(responses)}_{safe_name}.txt"
+                                fname.write_text(body, encoding='utf-8', errors='replace')
+                            except Exception:
+                                pass
+                        for m in re.finditer(r'https?://[^"\'\s]+\.zip', body):
+                            found_urls.add(m.group(0))
+                        for m in re.finditer(r'dl\.google\.com[^"\'\s]+', body):
+                            val = m.group(0)
+                            if val.startswith('http'):
+                                found_urls.add(val)
+                            else:
+                                found_urls.add('https://' + val)
                     except Exception:
                         return
-                    for m in re.finditer(r'https?://[^"\'\s]+\.zip', body):
-                        found_urls.add(m.group(0))
             except Exception:
                 return
 
         page.on("response", on_response)
+        
+        # capture console messages
+        def on_console(msg):
+            try:
+                text = msg.text()
+            except Exception:
+                text = str(msg)
+            console_messages.append(text)
+
+        page.on("console", on_console)
 
         try:
             page.goto(URL, timeout=timeout)
@@ -261,6 +303,17 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
         # post-process found urls
         for u in sorted(found_urls):
             try_add_url(u)
+
+        # save captured responses and console logs for offline debugging
+        if snapshot_dir:
+            try:
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                if responses:
+                    (snapshot_dir / 'responses_summary.json').write_text(json.dumps(responses, indent=2), encoding='utf-8')
+                if console_messages:
+                    (snapshot_dir / 'console.log').write_text('\n'.join(console_messages), encoding='utf-8')
+            except Exception:
+                pass
 
         browser.close()
     return collected
