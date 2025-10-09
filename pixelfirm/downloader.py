@@ -10,40 +10,24 @@ except Exception:
     from tqdm import tqdm
     _HAS_RICH = False
 
-LOCAL_MANIFEST = Path(__file__).parent / "manifest.json"
 REMOTE_MANIFEST = "https://raw.githubusercontent.com/Android-Artisan/PixelFirm/main/pixelfirm/manifest.json"
 
-def load_manifest(timeout: int = 30):
-    # Prefer local manifest when present (makes offline use reliable),
-    # then try to update/merge from remote if available.
-    local_data = None
-    if LOCAL_MANIFEST.exists():
-        try:
-            local_data = json.loads(LOCAL_MANIFEST.read_text())
-        except Exception as e:
-            raise RuntimeError(f"Failed to parse local manifest: {e}")
 
-    # Try to fetch remote manifest to update/override local entries
+def load_manifest(timeout: int = 30):
+    """Always fetch the remote manifest and return its parsed JSON.
+
+    This intentionally does NOT prefer or fall back to a local manifest file.
+    If the remote fetch fails or the JSON is invalid, a RuntimeError is raised.
+    """
     try:
         r = requests.get(REMOTE_MANIFEST, timeout=timeout)
         r.raise_for_status()
         try:
-            remote_data = r.json()
+            return r.json()
         except Exception as e:
-            # couldn't parse remote; return local if present
-            if local_data is not None:
-                return local_data
             raise RuntimeError(f"Failed to parse remote manifest JSON: {e}")
-        # If we have local data, merge and let remote override local keys
-        if local_data is not None:
-            merged = dict(local_data)
-            merged.update(remote_data)
-            return merged
-        return remote_data
-    except Exception:
-        if local_data is not None:
-            return local_data
-        raise
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch remote manifest: {e}")
 
 def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30, show_progress: bool = True):
     dest = Path(dest)

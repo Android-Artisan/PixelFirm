@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 # Playwright is optional at import time; import lazily where used
 
 URL = "https://developers.google.com/android/images"
-manifest_path = Path(__file__).resolve().parent.parent / "pixelfirm" / "manifest.json"
+REMOTE_MANIFEST = "https://raw.githubusercontent.com/Android-Artisan/PixelFirm/main/pixelfirm/manifest.json"
 
 
 def scrape_aosp_index() -> Dict[str, dict]:
@@ -535,21 +535,16 @@ def main():
             print(json.dumps(data, indent=2))
             return
 
-        # if we found nothing, try fallback manifest URL from env
-        if not data:
-            fb = os.environ.get("PIXELFIRM_FALLBACK_MANIFEST_URL")
-            if fb:
-                logging.info("Attempting to fetch fallback manifest from %s", fb)
-                try:
-                    r = requests.get(fb, timeout=30)
-                    r.raise_for_status()
-                    remote = r.json()
-                    if isinstance(remote, dict) and remote:
-                        data = remote
-                        logging.info("Loaded %d entries from fallback manifest", len(data))
-                except Exception as e:
-                    logging.warning("Failed to load fallback manifest: %s", e)
+        # Fetch the remote manifest
+        try:
+            r = requests.get(REMOTE_MANIFEST, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logging.error(f"Failed to fetch remote manifest: {e}")
+            sys.exit(1)
 
+        # Update the manifest logic here (remote-only)
         # don't overwrite with empty results; preserve existing
         if not data:
             logging.warning("No entries found; existing manifest will be preserved")

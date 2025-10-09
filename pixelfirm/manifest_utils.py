@@ -7,6 +7,9 @@ from typing import Optional, Tuple
 import requests
 
 
+REMOTE_MANIFEST = "https://raw.githubusercontent.com/Android-Artisan/PixelFirm/main/pixelfirm/manifest.json"
+
+
 def parse_factory_filename(url: str) -> Tuple[Optional[str], Optional[str]]:
     """Parse a factory filename URL into (codename, version).
 
@@ -38,37 +41,31 @@ def verify_url_head(url: str, timeout: int = 10) -> dict:
         return {"status": 0, "content_type": "", "size": None, "ok": False}
 
 
-def update_manifest_with_entry(url: str, manifest_path: Path = Path("pixelfirm/manifest.json"), verify: bool = True) -> dict:
+def update_manifest_with_entry(url: str, verify: bool = True) -> dict:
     """Add or update the manifest with a factory URL.
 
-    Returns the entry written to the manifest.
+    This function now fetches the remote manifest directly and updates it.
     """
     codename, version = parse_factory_filename(url)
     if not codename:
         raise ValueError("Could not parse codename from url")
 
     meta = {"url": url, "version": version or "unknown"}
+
     if verify:
         v = verify_url_head(url)
         meta.update({"size": v.get("size"), "verified": bool(v.get("ok", False))})
     else:
         meta.update({"size": None, "verified": False})
 
-    # load existing manifest
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    data = {}
-    if manifest_path.exists():
-        try:
-            text = manifest_path.read_text()
-            data = json.loads(text) if text.strip() else {}
-        except Exception:
-            data = {}
+    # Fetch the remote manifest
+    try:
+        r = requests.get(REMOTE_MANIFEST, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch remote manifest: {e}")
 
-    # backup
-    if manifest_path.exists():
-        bak = manifest_path.with_suffix(f".bak.{int(time.time())}")
-        manifest_path.replace(bak)
-
+    # Update the manifest
     data[codename] = meta
-    manifest_path.write_text(json.dumps(data, indent=2))
     return meta
