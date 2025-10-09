@@ -109,9 +109,7 @@ def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30, s
 
 def search_latest_and_download(codename: str, out_dir: Path, resume: bool = True, timeout: int = 30, show_progress: bool = True) -> Path:
     manifest = load_manifest(timeout=timeout)
-    print("Debug: Loaded manifest:", manifest)  # Debugging output
     if codename not in manifest:
-        print("Debug: Codename not found in manifest:", codename)  # Debugging output
         raise ValueError(f"No entry for codename {codename} in manifest.")
     entry = manifest[codename]
     url = entry["url"]
