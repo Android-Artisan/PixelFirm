@@ -45,8 +45,8 @@ jobs:
           fi
         continue-on-error: true
 
-      - name: Upload snapshots (on failure)
-        if: failure()
+      # Always upload snapshots so we can inspect them regardless of exit code
+      - name: Upload snapshots
         uses: actions/upload-artifact@v4
         with:
           name: manifest-snapshots
