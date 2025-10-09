@@ -233,6 +233,23 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
         except Exception:
             pass
 
+        # inspect window properties for embedded URLs or data
+        try:
+            js_text = page.evaluate("() => JSON.stringify(Object.keys(window).slice(0,200))")
+            if js_text:
+                # nothing to do here other than logging keys; but also search serialized window for zip patterns
+                all_text = page.evaluate("() => { try { return JSON.stringify(window) } catch(e) { return '' } }")
+                for m in re.finditer(r'https?://[^"\'\s]+\.zip', all_text or ''):
+                    found_urls.add(m.group(0))
+                for m in re.finditer(r'dl\.google\.com[^"\'\s]+', all_text or ''):
+                    val = m.group(0)
+                    if val.startswith('http'):
+                        found_urls.add(val)
+                    else:
+                        found_urls.add('https://' + val)
+        except Exception:
+            pass
+
         # post-process found urls
         for u in sorted(found_urls):
             try_add_url(u)
