@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 import sys
 from typing import Dict, Optional
+import os
 
 import requests
 from bs4 import BeautifulSoup
@@ -221,6 +222,25 @@ def main():
         if args.dry_run:
             print(json.dumps(data, indent=2))
             return
+
+        # if we found nothing, try fallback manifest URL from env
+        if not data:
+            fb = None
+            try:
+                fb = os.environ.get("PIXELFIRM_FALLBACK_MANIFEST_URL")
+            except Exception:
+                fb = None
+            if fb:
+                logging.info("Attempting to fetch fallback manifest from %s", fb)
+                try:
+                    r = requests.get(fb, timeout=30)
+                    r.raise_for_status()
+                    remote = r.json()
+                    if isinstance(remote, dict) and remote:
+                        data = remote
+                        logging.info("Loaded %d entries from fallback manifest", len(data))
+                except Exception as e:
+                    logging.warning("Failed to load fallback manifest: %s", e)
 
         # don't overwrite with empty results; preserve existing
         if not data:
