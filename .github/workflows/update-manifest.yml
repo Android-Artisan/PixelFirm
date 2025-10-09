@@ -31,7 +31,26 @@ jobs:
 
       - name: Run manifest updater
         run: |
-          python scripts/update_manifest.py
+          mkdir -p artifacts/snapshots
+          python scripts/update_manifest.py --snapshot-dir artifacts/snapshots --max-pages 300 || true
+
+      - name: Check manifest and upload snapshots on empty result
+        run: |
+          if [ ! -s pixelfirm/manifest.json ] || grep -q "{}" pixelfirm/manifest.json; then
+            echo "Manifest empty; uploading snapshots for debugging"
+            ls -lah artifacts/snapshots || true
+            exit 1
+          else
+            echo "Manifest populated"
+          fi
+        continue-on-error: true
+
+      - name: Upload snapshots (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-snapshots
+          path: artifacts/snapshots
 
       - name: Commit manifest
         run: |
