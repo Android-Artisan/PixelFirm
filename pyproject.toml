@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelfirm"
+version = "0.1.0"
+description = "PixelFirm — Android firmware helper tool"
+readme = "README.md"
+requires-python = ">=3.7"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Android Artisan", email = "romartisan2025@gmail.com" }
+]
+dependencies = [
+  "requests",
+  "click"
+]
+
+[project.urls]
+Homepage = "https://github.com/Android-Artisan/PixelFirm"
+BugTracker = "https://github.com/Android-Artisan/PixelFirm/issues"
