@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
+import logging
 import re
+import time
 from pathlib import Path
 import sys
-from typing import Dict
+from typing import Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+
+# Playwright is optional at import time; import lazily where used
 
 URL = "https://developers.google.com/android/images"
 manifest_path = Path(__file__).resolve().parent.parent / "pixelfirm" / "manifest.json"
@@ -39,11 +43,17 @@ def scrape_aosp_index() -> Dict[str, dict]:
         return {}
 
 
-def scrape_developers_playwright(timeout: int = 30000) -> Dict[str, dict]:
+def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None) -> Dict[str, dict]:
     """Use Playwright to navigate developers.google.com and visit per-device pages to find dl.google .zip links.
 
     This is a best-effort fallback when the AOSP index isn't available.
     """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        logging.warning("Playwright not available: %s", e)
+        return {}
+
     collected = {}
     found_urls = set()
 
@@ -64,13 +74,14 @@ def scrape_developers_playwright(timeout: int = 30000) -> Dict[str, dict]:
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context()
+        page = context.new_page()
 
         # capture responses and search for .zip urls in responses
         def on_response(response):
             try:
                 r_url = response.url
-                if r_url.endswith('.zip'):
+                if r_url and r_url.lower().endswith('.zip'):
                     found_urls.add(r_url)
                     return
                 ct = response.headers.get('content-type', '')
@@ -85,8 +96,14 @@ def scrape_developers_playwright(timeout: int = 30000) -> Dict[str, dict]:
                 return
 
         page.on("response", on_response)
-        page.goto(URL, timeout=timeout)
-        page.wait_for_load_state("networkidle", timeout=timeout)
+
+        try:
+            page.goto(URL, timeout=timeout)
+        except Exception:
+            logging.debug("Failed to open main developers page")
+
+        # short pause to let client-side scripts run
+        page.wait_for_timeout(1500)
 
         # find candidate links to follow (device pages or sections)
         anchors = page.query_selector_all("a[href]")
@@ -101,12 +118,25 @@ def scrape_developers_playwright(timeout: int = 30000) -> Dict[str, dict]:
                 else:
                     device_pages.add(href)
 
-        # visit discovered device pages (bounded)
-        for dp in list(device_pages)[:300]:
+        # visit discovered device pages (bounded by max_pages)
+        count = 0
+        for dp in list(device_pages):
+            if count >= max_pages:
+                break
+            count += 1
             try:
                 page.goto(dp, timeout=timeout)
-                page.wait_for_load_state("networkidle", timeout=timeout)
+                page.wait_for_timeout(1000)
+                # optionally save a snapshot for debugging
+                if snapshot_dir:
+                    try:
+                        snapshot_dir.mkdir(parents=True, exist_ok=True)
+                        name = re.sub(r'[^a-z0-9.-]+', '_', dp)
+                        (snapshot_dir / f"{name}.html").write_text(page.content())
+                    except Exception:
+                        pass
             except Exception:
+                logging.debug("Failed to open device page %s", dp)
                 continue
 
         # also search the main page html for urls
@@ -139,12 +169,40 @@ def scrape() -> Dict[str, dict]:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--timeout", type=int, default=15_000, help="Playwright timeout per page (ms)")
+    parser.add_argument("--max-pages", type=int, default=200, help="Maximum number of device pages to visit")
+    parser.add_argument("--snapshot-dir", type=Path, help="Directory to store HTML snapshots for debugging")
+    parser.add_argument("--dry-run", action="store_true", help="Don't write manifest, just print summary")
+    parser.add_argument("--verbose", action="store_true", help="Verbose logging")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s: %(message)s")
+
     try:
+        logging.info("Starting manifest scrape")
         data = scrape()
+        logging.info("Scrape found %d entries", len(data))
+
+        if args.dry_run:
+            print(json.dumps(data, indent=2))
+            return
+
+        # don't overwrite with empty results; preserve existing
+        if not data:
+            logging.warning("No entries found; existing manifest will be preserved")
+            return
+
+        # backup existing manifest
+        if manifest_path.exists():
+            bak = manifest_path.with_suffix(f".bak.{int(time.time())}")
+            manifest_path.replace(bak)
+            logging.info("Backed up existing manifest to %s", bak)
+
         manifest_path.write_text(json.dumps(data, indent=2))
-        print(f"Updated manifest with {len(data)} entries")
+        logging.info("Updated manifest with %d entries", len(data))
     except Exception as e:
-        print("Failed to update manifest:", e, file=sys.stderr)
+        logging.exception("Failed to update manifest: %s", e)
         sys.exit(1)
 
 
