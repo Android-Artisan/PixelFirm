@@ -1,8 +1,14 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import sys
 import requests
-from tqdm import tqdm
+try:
+    from rich.progress import Progress, BarColumn, DownloadColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+    _HAS_RICH = True
+except Exception:
+    from tqdm import tqdm
+    _HAS_RICH = False
 
 LOCAL_MANIFEST = Path(__file__).parent / "manifest.json"
 REMOTE_MANIFEST = "https://raw.githubusercontent.com/Android-Artisan/PixelFirm/main/pixelfirm/manifest.json"
@@ -60,19 +66,49 @@ def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30, s
                 total = int(r.headers["Content-Length"]) + (existing if "Range" in headers else 0)
             except Exception:
                 total = None
-        # Only show progress when requested and when stdout is a TTY
-        disable_bar = not show_progress
-        # If total is None, tqdm will show indeterminate progress; still allow it if show_progress=True
-        pbar = tqdm(
-            total=total,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            initial=existing,
-            desc=dest.name,
-            disable=disable_bar,
-            leave=True,
-        )
+        # Only show progress when requested
+        if show_progress and _HAS_RICH and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            # Use rich progress bar
+            progress = Progress(
+                TextColumn("[bold green]{task.fields[filename]}", justify="right"),
+                BarColumn(bar_width=None, complete_style="green"),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+            )
+            task = progress.add_task("download", filename=dest.name, total=total or 0)
+            progress.start()
+            try:
+                with open(temp, mode) as f:
+                    for chunk in r.iter_content(chunk_size=128 * 1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        progress.update(task, advance=len(chunk))
+            finally:
+                progress.stop()
+        else:
+            disable_bar = not show_progress
+            # If total is None, tqdm will show indeterminate progress; still allow it if show_progress=True
+            pbar = tqdm(
+                total=total,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                initial=existing,
+                desc=dest.name,
+                disable=disable_bar,
+                leave=True,
+            )
+            try:
+                with open(temp, mode) as f:
+                    for chunk in r.iter_content(chunk_size=128 * 1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+            finally:
+                pbar.close()
         try:
             with open(temp, mode) as f:
                 for chunk in r.iter_content(chunk_size=128*1024):
@@ -83,6 +119,12 @@ def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30, s
         finally:
             pbar.close()
     temp.rename(dest)
+    # Print a confirmation line
+    try:
+        if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            print(f"Download complete: {dest}")
+    except Exception:
+        pass
     return dest
 
 def search_latest_and_download(codename: str, out_dir: Path, resume: bool = True, timeout: int = 30, show_progress: bool = True) -> Path:
