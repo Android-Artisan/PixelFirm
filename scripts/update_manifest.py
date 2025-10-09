@@ -44,6 +44,36 @@ def scrape_aosp_index() -> Dict[str, dict]:
         return {}
 
 
+def try_additional_indexes() -> Dict[str, dict]:
+    urls = os.environ.get("PIXELFIRM_INDEX_URLS")
+    if not urls:
+        return {}
+    entries = {}
+    for u in urls.split(','):
+        u = u.strip()
+        if not u:
+            continue
+        try:
+            r = requests.get(u, timeout=30)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if not href.endswith(".zip"):
+                    continue
+                url = href if href.startswith("http") else u.rstrip("/") + "/" + href.lstrip("/")
+                fname = url.split("/")[-1]
+                if "-factory-" not in fname:
+                    continue
+                codename = fname.split("-")[0]
+                m = re.search(r"-([a-z0-9.]+)-factory", fname)
+                version = m.group(1) if m else "unknown"
+                entries[codename] = {"url": url, "version": version}
+        except Exception:
+            continue
+    return entries
+
+
 def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None) -> Dict[str, dict]:
     """Use Playwright to navigate developers.google.com and visit per-device pages to find dl.google .zip links.
 
@@ -58,7 +88,7 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
     collected = {}
     found_urls = set()
 
-    def try_add_url(url: str):
+    def try_add_url(url: str, verify: bool = True):
         if not url:
             return
         if not url.startswith("http"):
@@ -71,7 +101,28 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
         codename = fname.split("-")[0]
         m = re.search(r"-([a-z0-9.]+)-factory", fname)
         version = m.group(1) if m else "unknown"
-        collected[codename] = {"url": url, "version": version}
+        entry = {"url": url, "version": version}
+        if verify:
+            try:
+                r = requests.head(url, timeout=10, allow_redirects=True)
+                r.raise_for_status()
+                ct = r.headers.get("content-type", "")
+                cl = r.headers.get("content-length")
+                size = int(cl) if cl and cl.isdigit() else None
+                # basic content type check
+                if "zip" in ct or "application" in ct or size:
+                    entry["size"] = size
+                    entry["verified"] = True
+                else:
+                    logging.debug("URL %s fails content-type check: %s", url, ct)
+                    return
+            except Exception as e:
+                logging.debug("HEAD request failed for %s: %s", url, e)
+                return
+        else:
+            entry["verified"] = False
+
+        collected[codename] = entry
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -190,14 +241,31 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
     return collected
 
 
-def scrape() -> Dict[str, dict]:
-    # 1) try the AOSP index
+def scrape(verify: bool = True, timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None) -> Dict[str, dict]:
+    # 1) try the AOSP index (no verify here)
     by_aosp = scrape_aosp_index()
     if by_aosp:
         return by_aosp
     # 2) fallback to developers pages using Playwright
-    by_dev = scrape_developers_playwright()
+    by_dev = scrape_developers_playwright(timeout=timeout, max_pages=max_pages, snapshot_dir=snapshot_dir)
     if by_dev:
+        # when using dev scraping, optionally verify the discovered urls
+        if verify:
+            verified = {}
+            for k, v in by_dev.items():
+                url = v.get('url')
+                try:
+                    r = requests.head(url, timeout=10, allow_redirects=True)
+                    r.raise_for_status()
+                    ct = r.headers.get('content-type', '')
+                    cl = r.headers.get('content-length')
+                    size = int(cl) if cl and cl.isdigit() else None
+                    v['size'] = size
+                    v['verified'] = True
+                    verified[k] = v
+                except Exception:
+                    continue
+            return verified
         return by_dev
     # 3) nothing found
     return {}
@@ -208,6 +276,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=15_000, help="Playwright timeout per page (ms)")
     parser.add_argument("--max-pages", type=int, default=200, help="Maximum number of device pages to visit")
     parser.add_argument("--snapshot-dir", type=Path, help="Directory to store HTML snapshots for debugging")
+    parser.add_argument("--no-verify", action="store_true", help="Do not verify discovered URLs with HEAD")
     parser.add_argument("--dry-run", action="store_true", help="Don't write manifest, just print summary")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args()
@@ -216,7 +285,7 @@ def main():
 
     try:
         logging.info("Starting manifest scrape")
-        data = scrape()
+        data = scrape(verify=not args.no_verify, timeout=args.timeout, max_pages=args.max_pages, snapshot_dir=args.snapshot_dir)
         logging.info("Scrape found %d entries", len(data))
 
         if args.dry_run:
@@ -225,11 +294,7 @@ def main():
 
         # if we found nothing, try fallback manifest URL from env
         if not data:
-            fb = None
-            try:
-                fb = os.environ.get("PIXELFIRM_FALLBACK_MANIFEST_URL")
-            except Exception:
-                fb = None
+            fb = os.environ.get("PIXELFIRM_FALLBACK_MANIFEST_URL")
             if fb:
                 logging.info("Attempting to fetch fallback manifest from %s", fb)
                 try:
