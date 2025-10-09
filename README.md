@@ -44,17 +44,10 @@ PixelFirm is a command‑line utility written in Python that lets you easily fet
 
 ## Installation
 
-You can install PixelFirm in several ways:
+To install PixelFirm, run:
 
 ```bash
-# Option 1: Clone and install locally
-git clone https://github.com/Android-Artisan/PixelFirm.git
-cd PixelFirm
-pip install -r requirements.txt
-python setup.py install
-
-# Option 2: Install via pip (if comming soon)
-# pip install pixelfirm
+pip install pixelfirm
 ```
 
 ---
