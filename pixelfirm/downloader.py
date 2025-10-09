@@ -5,21 +5,41 @@ import requests
 from tqdm import tqdm
 
 LOCAL_MANIFEST = Path(__file__).parent / "manifest.json"
-REMOTE_MANIFEST = "https://raw.githubusercontent.com/YOUR_GITHUB_USER/pixelfirm/main/pixelfirm/manifest.json"
+REMOTE_MANIFEST = "https://raw.githubusercontent.com/Android-Artisan/PixelFirm/main/pixelfirm/manifest.json"
 
 def load_manifest(timeout: int = 30):
-    # Try online manifest first
+    # Prefer local manifest when present (makes offline use reliable),
+    # then try to update/merge from remote if available.
+    local_data = None
+    if LOCAL_MANIFEST.exists():
+        try:
+            local_data = json.loads(LOCAL_MANIFEST.read_text())
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse local manifest: {e}")
+
+    # Try to fetch remote manifest to update/override local entries
     try:
         r = requests.get(REMOTE_MANIFEST, timeout=timeout)
         r.raise_for_status()
-        return r.json()
+        try:
+            remote_data = r.json()
+        except Exception as e:
+            # couldn't parse remote; return local if present
+            if local_data is not None:
+                return local_data
+            raise RuntimeError(f"Failed to parse remote manifest JSON: {e}")
+        # If we have local data, merge and let remote override local keys
+        if local_data is not None:
+            merged = dict(local_data)
+            merged.update(remote_data)
+            return merged
+        return remote_data
     except Exception:
-        # fallback to local
-        if LOCAL_MANIFEST.exists():
-            return json.loads(LOCAL_MANIFEST.read_text())
-        raise RuntimeError("Failed to fetch manifest online and no local copy found.")
+        if local_data is not None:
+            return local_data
+        raise
 
-def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30):
+def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30, show_progress: bool = True):
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     temp = dest.with_suffix(dest.suffix + ".part")
@@ -40,7 +60,19 @@ def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30):
                 total = int(r.headers["Content-Length"]) + (existing if "Range" in headers else 0)
             except Exception:
                 total = None
-        pbar = tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024, initial=existing, desc=dest.name)
+        # Only show progress when requested and when stdout is a TTY
+        disable_bar = not show_progress
+        # If total is None, tqdm will show indeterminate progress; still allow it if show_progress=True
+        pbar = tqdm(
+            total=total,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            initial=existing,
+            desc=dest.name,
+            disable=disable_bar,
+            leave=True,
+        )
         try:
             with open(temp, mode) as f:
                 for chunk in r.iter_content(chunk_size=128*1024):
@@ -53,7 +85,7 @@ def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30):
     temp.rename(dest)
     return dest
 
-def search_latest_and_download(codename: str, out_dir: Path, resume: bool = True, timeout: int = 30) -> Path:
+def search_latest_and_download(codename: str, out_dir: Path, resume: bool = True, timeout: int = 30, show_progress: bool = True) -> Path:
     manifest = load_manifest(timeout=timeout)
     if codename not in manifest:
         raise ValueError(f"No entry for codename {codename} in manifest.")
@@ -63,4 +95,4 @@ def search_latest_and_download(codename: str, out_dir: Path, resume: bool = True
     dest = Path(out_dir) / filename
     print("Selected:", filename)
     print("Downloading from:", url)
-    return download_url(url, dest, resume=resume, timeout=timeout)
+    return download_url(url, dest, resume=resume, timeout=timeout, show_progress=show_progress)

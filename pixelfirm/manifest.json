@@ -1,1 +1,6 @@
-{}
+{
+	"testdevice": {
+		"url": "https://raw.githubusercontent.com/Android-Artisan/PixelFirm/main/README.md",
+		"version": "demo"
+	}
+}
