@@ -11,7 +11,7 @@ setup(
     long_description=long_desc,
     long_description_content_type="text/markdown",
     author="Android Artisan",
-    author_email="youremail@example.com",  # optional but recommended
+    author_email="romartisan2025@gmail.com",
     url="https://github.com/Android-Artisan/PixelFirm",
     license="GPL-3.0-or-later",
     packages=find_packages(),
