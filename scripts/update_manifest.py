@@ -126,7 +126,41 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
             count += 1
             try:
                 page.goto(dp, timeout=timeout)
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(800)
+
+                # Scroll the page to trigger lazy loading
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(400)
+                except Exception:
+                    pass
+
+                # Try clicking elements that likely reveal downloads
+                try:
+                    # click any element with text matching 'factory' or 'download'
+                    loc = page.locator("text=/factory/i")
+                    n = loc.count()
+                    for i in range(n):
+                        try:
+                            loc.nth(i).click(timeout=1000)
+                            page.wait_for_timeout(200)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                try:
+                    loc2 = page.locator("text=/download/i")
+                    n2 = loc2.count()
+                    for i in range(n2):
+                        try:
+                            loc2.nth(i).click(timeout=1000)
+                            page.wait_for_timeout(200)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
                 # optionally save a snapshot for debugging
                 if snapshot_dir:
                     try:
