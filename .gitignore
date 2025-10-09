@@ -32,3 +32,10 @@ tmp/
 
 # Ignore manifest edits in working dir? (manifest is tracked intentionally)
 # pixelfirm/manifest.json
+
+# Playwright snapshot dir used during local runs
+/tmp/pw_snapshots
+pw_snapshots
+
+# manifest backups created by scripts
+pixelfirm/manifest.bak.*

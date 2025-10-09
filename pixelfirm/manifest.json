@@ -1,1 +1,9 @@
-{}
+{
+  "blazer": {
+    "url": "https://dl.google.com/dl/android/aosp/blazer-bd1a.250702.001-factory-f2267c45.zip",
+    "version": "bd1a.250702.001",
+    "size": 9802117513,
+    "verified": true,
+    "updated_at": 1760007263
+  }
+}

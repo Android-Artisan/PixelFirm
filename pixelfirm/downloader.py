@@ -109,15 +109,11 @@ def download_url(url: str, dest: Path, resume: bool = True, timeout: int = 30, s
                         pbar.update(len(chunk))
             finally:
                 pbar.close()
-        try:
-            with open(temp, mode) as f:
-                for chunk in r.iter_content(chunk_size=128*1024):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    pbar.update(len(chunk))
-        finally:
-            pbar.close()
+        # response has already been streamed and written above in the chosen
+        # progress branch (rich or tqdm). Do not iterate r.iter_content again
+        # here — that causes requests.exceptions.StreamConsumedError because
+        # the response stream was consumed. The file has already been written
+        # to the temporary .part file at this point.
     temp.rename(dest)
     # Print a confirmation line
     try:

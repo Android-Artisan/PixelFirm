@@ -74,7 +74,7 @@ def try_additional_indexes() -> Dict[str, dict]:
     return entries
 
 
-def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None) -> Dict[str, dict]:
+def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None, headful: bool = False) -> Dict[str, dict]:
     """Use Playwright to navigate developers.google.com and visit per-device pages to find dl.google .zip links.
 
     This is a best-effort fallback when the AOSP index isn't available.
@@ -111,7 +111,6 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                 ct = r.headers.get("content-type", "")
                 cl = r.headers.get("content-length")
                 size = int(cl) if cl and cl.isdigit() else None
-                # basic content type check
                 if "zip" in ct or "application" in ct or size:
                     entry["size"] = size
                     entry["verified"] = True
@@ -127,11 +126,83 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
         collected[codename] = entry
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=not headful)
         context = browser.new_context()
         page = context.new_page()
 
-        # capture responses and search for .zip urls in responses
+        def _handle_page_capture(payload):
+            try:
+                import json as _json
+                obj = None
+                if isinstance(payload, str):
+                    try:
+                        obj = _json.loads(payload)
+                    except Exception:
+                        obj = {"text": payload}
+                else:
+                    obj = payload
+                url = obj.get("url") if isinstance(obj, dict) else None
+                status = obj.get("status") if isinstance(obj, dict) else None
+                text = obj.get("text") if isinstance(obj, dict) else None
+                meta = {"url": url, "status": status, "from_page_capture": True}
+                if text:
+                    meta["body_snippet"] = (text or "")[:4096]
+                responses.append(meta)
+
+                if snapshot_dir and text:
+                    try:
+                        resp_dir = snapshot_dir / "responses"
+                        resp_dir.mkdir(parents=True, exist_ok=True)
+                        safe_name = re.sub(r"[^a-z0-9._-]+", "_", (url or "page_capture"))
+                        idx = len(responses)
+                        fname = resp_dir / f"pwcap_{idx}_{safe_name}.txt"
+                        fname.write_text(text, encoding='utf-8', errors='replace')
+                    except Exception:
+                        pass
+            except Exception:
+                return
+
+        try:
+            page.expose_function("__pw_capture", _handle_page_capture)
+            js_hook = r"""
+            (() => {
+              try {
+                const origFetch = window.fetch;
+                window.fetch = async function(...args) {
+                  const resp = await origFetch.apply(this, args);
+                  try {
+                    const clone = resp.clone();
+                    const text = await clone.text().catch(() => null);
+                    if (window.__pw_capture) {
+                      try { window.__pw_capture(JSON.stringify({url: resp.url, status: resp.status, text: text})); } catch(e) {}
+                    }
+                  } catch(e) {}
+                  return resp;
+                };
+              } catch(e) {}
+              try {
+                const origOpen = XMLHttpRequest.prototype.open;
+                const origSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open = function(method, url) { this._pxf_url = url; return origOpen.apply(this, arguments); };
+                XMLHttpRequest.prototype.send = function(body) {
+                  this.addEventListener('load', function(){
+                    try {
+                      var txt = null;
+                      try { txt = this.responseText; } catch(e) {}
+                      if (window.__pw_capture) {
+                        try { window.__pw_capture(JSON.stringify({url: this._pxf_url, status: this.status, text: txt})); } catch(e) {}
+                      }
+                    } catch(e) {}
+                  });
+                  return origSend.apply(this, arguments);
+                };
+              } catch(e) {}
+            })();
+            """
+            page.add_init_script(js_hook)
+        except Exception:
+            pass
+
         def on_response(response):
             try:
                 r_url = response.url
@@ -139,24 +210,17 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                     found_urls.add(r_url)
                     return
                 ct = response.headers.get('content-type', '')
-                # Record metadata about the response
-                meta = {
-                    'url': r_url,
-                    'status': None,
-                    'content-type': ct,
-                }
+                meta = {'url': r_url, 'status': None, 'content-type': ct}
                 try:
                     meta['status'] = response.status
                 except Exception:
                     pass
 
-                # Try to capture textual responses (json/html/js/text) for offline analysis
                 if any(k in ct for k in ('json', 'text', 'html', 'javascript')):
                     try:
                         body = response.text()
                         meta['body_snippet'] = body[:4096]
                         responses.append(meta)
-                        # save full body to snapshot_dir/responses for debugging
                         if snapshot_dir:
                             try:
                                 resp_dir = snapshot_dir / 'responses'
@@ -166,22 +230,55 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                                 fname.write_text(body, encoding='utf-8', errors='replace')
                             except Exception:
                                 pass
-                        for m in re.finditer(r'https?://[^"\'\s]+\.zip', body):
+
+                        for m in re.finditer(r'https?://[^"\'"\s]+\.zip', body):
                             found_urls.add(m.group(0))
-                        for m in re.finditer(r'dl\.google\.com[^"\'\s]+', body):
+                        for m in re.finditer(r'dl\.google\.com[^"\'"\s]+', body):
                             val = m.group(0)
                             if val.startswith('http'):
                                 found_urls.add(val)
                             else:
                                 found_urls.add('https://' + val)
+
+                        try:
+                            parsed = None
+                            import json as _json
+                            parsed = _json.loads(body)
+
+                            def scan_obj(o):
+                                if isinstance(o, str):
+                                    if '.zip' in o.lower() or 'dl.google' in o.lower():
+                                        if o.startswith('http'):
+                                            found_urls.add(o)
+                                        else:
+                                            if o.startswith('//'):
+                                                found_urls.add('https:' + o)
+                                            elif o.startswith('/'):
+                                                found_urls.add('https://developers.google.com' + o)
+                                            else:
+                                                if 'dl.google' in o:
+                                                    if o.startswith('http'):
+                                                        found_urls.add(o)
+                                                    else:
+                                                        found_urls.add('https://' + o)
+                                elif isinstance(o, dict):
+                                    for v in o.values():
+                                        scan_obj(v)
+                                elif isinstance(o, list):
+                                    for v in o:
+                                        scan_obj(v)
+
+                            if parsed is not None:
+                                scan_obj(parsed)
+                        except Exception:
+                            pass
                     except Exception:
                         return
             except Exception:
                 return
 
-        page.on("response", on_response)
-        
-        # capture console messages
+        page.on('response', on_response)
+
         def on_console(msg):
             try:
                 text = msg.text()
@@ -189,38 +286,36 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                 text = str(msg)
             console_messages.append(text)
 
-        page.on("console", on_console)
+        page.on('console', on_console)
 
         try:
             page.goto(URL, timeout=timeout)
+            try:
+                page.wait_for_load_state('networkidle', timeout=min(timeout, 10000))
+            except Exception:
+                page.wait_for_timeout(2000)
         except Exception:
-            logging.debug("Failed to open main developers page")
+            logging.debug('Failed to open main developers page')
 
-        # short pause to let client-side scripts run
-        page.wait_for_timeout(1500)
-
-        # Always save a main page snapshot (helps CI debugging if no links found)
         if snapshot_dir:
             try:
                 snapshot_dir.mkdir(parents=True, exist_ok=True)
-                (snapshot_dir / "main_page.html").write_text(page.content())
+                (snapshot_dir / 'main_page.html').write_text(page.content())
             except Exception:
                 pass
 
-        # find candidate links to follow (device pages or sections)
-        anchors = page.query_selector_all("a[href]")
+        anchors = page.query_selector_all('a[href]')
         device_pages = set()
         for a in anchors:
-            href = a.get_attribute("href")
+            href = a.get_attribute('href')
             if not href:
                 continue
-            if href.startswith("/android/images") or href.startswith(URL):
-                if href.startswith("/"):
-                    device_pages.add("https://developers.google.com" + href)
+            if href.startswith('/android/images') or href.startswith(URL):
+                if href.startswith('/'):
+                    device_pages.add('https://developers.google.com' + href)
                 else:
                     device_pages.add(href)
 
-        # visit discovered device pages (bounded by max_pages)
         count = 0
         for dp in list(device_pages):
             if count >= max_pages:
@@ -228,19 +323,19 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
             count += 1
             try:
                 page.goto(dp, timeout=timeout)
-                page.wait_for_timeout(800)
-
-                # Scroll the page to trigger lazy loading
                 try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_load_state('networkidle', timeout=min(timeout, 8000))
+                except Exception:
+                    page.wait_for_timeout(1000)
+
+                try:
+                    page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                     page.wait_for_timeout(400)
                 except Exception:
                     pass
 
-                # Try clicking elements that likely reveal downloads
                 try:
-                    # click any element with text matching 'factory' or 'download'
-                    loc = page.locator("text=/factory/i")
+                    loc = page.locator('text=/factory/i')
                     n = loc.count()
                     for i in range(n):
                         try:
@@ -252,7 +347,27 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                     pass
 
                 try:
-                    loc2 = page.locator("text=/download/i")
+                    onclicks = page.query_selector_all('[onclick]')
+                    for el in onclicks:
+                        try:
+                            val = el.get_attribute('onclick') or ''
+                            if '.zip' in val or 'download' in val.lower():
+                                try:
+                                    el.scroll_into_view_if_needed()
+                                except Exception:
+                                    pass
+                                try:
+                                    el.click(timeout=1000)
+                                    page.wait_for_timeout(200)
+                                except Exception:
+                                    continue
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                try:
+                    loc2 = page.locator('text=/download/i')
                     n2 = loc2.count()
                     for i in range(n2):
                         try:
@@ -263,7 +378,6 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                 except Exception:
                     pass
 
-                # optionally save a snapshot for debugging
                 if snapshot_dir:
                     try:
                         snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -271,27 +385,79 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
                         (snapshot_dir / f"{name}.html").write_text(page.content())
                     except Exception:
                         pass
+
+                try:
+                    anchors = page.query_selector_all('a[href]')
+                    for a in anchors:
+                        try:
+                            h = a.get_attribute('href')
+                            if h and h.lower().endswith('.zip'):
+                                if h.startswith('//'):
+                                    found_urls.add('https:' + h)
+                                elif h.startswith('/'):
+                                    found_urls.add('https://developers.google.com' + h)
+                                else:
+                                    found_urls.add(h)
+                        except Exception:
+                            continue
+
+                    elems = page.query_selector_all('[data-download],[data-url],[data-href]')
+                    for e in elems:
+                        try:
+                            for attr in ('data-download','data-url','data-href'):
+                                v = e.get_attribute(attr)
+                                if v and ('.zip' in v or 'dl.google' in v):
+                                    if v.startswith('//'):
+                                        found_urls.add('https:' + v)
+                                    elif v.startswith('/'):
+                                        found_urls.add('https://developers.google.com' + v)
+                                    else:
+                                        found_urls.add(v)
+                        except Exception:
+                            continue
+
+                    try:
+                        js_snippet = (
+                            '() => { '
+                            'const out = []; '
+                            'try { Array.from(document.querySelectorAll("a")).slice(0,200).forEach(a => { if (a.href) out.push(a.href); }); } catch(e) {} '
+                            'try { const els = Array.from(document.querySelectorAll("[data-download],[data-url],[data-href]")); els.forEach(el => { ["data-download","data-url","data-href"].forEach(k => { if (el.getAttribute(k)) out.push(el.getAttribute(k)); }); }); } catch(e) {} '
+                            'return out.slice(0,500); '
+                            '}'
+                        )
+                        snippets = page.evaluate(js_snippet)
+                        for s in (snippets or []):
+                            if not s:
+                                continue
+                            if isinstance(s, str) and ('.zip' in s.lower() or 'dl.google' in s.lower()):
+                                if s.startswith('//'):
+                                    found_urls.add('https:' + s)
+                                elif s.startswith('/'):
+                                    found_urls.add('https://developers.google.com' + s)
+                                else:
+                                    found_urls.add(s)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             except Exception:
-                logging.debug("Failed to open device page %s", dp)
+                logging.debug('Failed to open device page %s', dp)
                 continue
 
-        # also search the main page html for urls
         try:
             html = page.content()
-            for m in re.finditer(r'https?://[^"\'\s]+\.zip', html):
+            for m in re.finditer(r'https?://[^"\'"\s]+\.zip', html):
                 found_urls.add(m.group(0))
         except Exception:
             pass
 
-        # inspect window properties for embedded URLs or data
         try:
             js_text = page.evaluate("() => JSON.stringify(Object.keys(window).slice(0,200))")
             if js_text:
-                # nothing to do here other than logging keys; but also search serialized window for zip patterns
                 all_text = page.evaluate("() => { try { return JSON.stringify(window) } catch(e) { return '' } }")
-                for m in re.finditer(r'https?://[^"\'\s]+\.zip', all_text or ''):
+                for m in re.finditer(r'https?://[^"\'"\s]+\.zip', all_text or ''):
                     found_urls.add(m.group(0))
-                for m in re.finditer(r'dl\.google\.com[^"\'\s]+', all_text or ''):
+                for m in re.finditer(r'dl\.google\.com[^"\'"\s]+', all_text or ''):
                     val = m.group(0)
                     if val.startswith('http'):
                         found_urls.add(val)
@@ -300,11 +466,9 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
         except Exception:
             pass
 
-        # post-process found urls
         for u in sorted(found_urls):
             try_add_url(u)
 
-        # save captured responses and console logs for offline debugging
         if snapshot_dir:
             try:
                 snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -319,13 +483,13 @@ def scrape_developers_playwright(timeout: int = 15000, max_pages: int = 200, sna
     return collected
 
 
-def scrape(verify: bool = True, timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None) -> Dict[str, dict]:
+def scrape(verify: bool = True, timeout: int = 15000, max_pages: int = 200, snapshot_dir: Optional[Path] = None, headful: bool = False) -> Dict[str, dict]:
     # 1) try the AOSP index (no verify here)
     by_aosp = scrape_aosp_index()
     if by_aosp:
         return by_aosp
     # 2) fallback to developers pages using Playwright
-    by_dev = scrape_developers_playwright(timeout=timeout, max_pages=max_pages, snapshot_dir=snapshot_dir)
+    by_dev = scrape_developers_playwright(timeout=timeout, max_pages=max_pages, snapshot_dir=snapshot_dir, headful=headful)
     if by_dev:
         # when using dev scraping, optionally verify the discovered urls
         if verify:
@@ -354,6 +518,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=15_000, help="Playwright timeout per page (ms)")
     parser.add_argument("--max-pages", type=int, default=200, help="Maximum number of device pages to visit")
     parser.add_argument("--snapshot-dir", type=Path, help="Directory to store HTML snapshots for debugging")
+    parser.add_argument("--headful", action="store_true", help="Run Playwright in headful mode (visible browser)")
     parser.add_argument("--no-verify", action="store_true", help="Do not verify discovered URLs with HEAD")
     parser.add_argument("--dry-run", action="store_true", help="Don't write manifest, just print summary")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
@@ -363,7 +528,7 @@ def main():
 
     try:
         logging.info("Starting manifest scrape")
-        data = scrape(verify=not args.no_verify, timeout=args.timeout, max_pages=args.max_pages, snapshot_dir=args.snapshot_dir)
+        data = scrape(verify=not args.no_verify, timeout=args.timeout, max_pages=args.max_pages, snapshot_dir=args.snapshot_dir, headful=args.headful)
         logging.info("Scrape found %d entries", len(data))
 
         if args.dry_run:
