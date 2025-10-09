@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="pixelfirm",
-    version="1.0.1",
+    version="1.0.0",
     description="Download latest Google Pixel factory images by codename",
     long_description=long_desc,
     long_description_content_type="text/markdown",
