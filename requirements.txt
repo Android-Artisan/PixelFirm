@@ -1,7 +1,0 @@
-requests
-beautifulsoup4
-tqdm
-pytest
-requests-mock
-playwright
-rich
